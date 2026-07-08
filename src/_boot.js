@@ -184,7 +184,12 @@ function createWindow(settings) {
     if (!pinToWorkArea) { width++; height++; }
     // An auto-hide dock doesn't reserve space in workArea, so it can still
     // overlay the window's bottom edge. Shave off extra clearance for it.
-    if (pinToWorkArea) { height -= 70; }
+    if (pinToWorkArea) {
+        height -= 70;
+        let narrowedWidth = Math.round(width * 0.9);
+        x += Math.round((width - narrowedWidth) / 2);
+        width = narrowedWidth;
+    }
     win = new BrowserWindow({
         title: "eDEX-UI",
         x,
