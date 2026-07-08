@@ -52,6 +52,9 @@ const kblayoutsDir = path.join(electron.app.getPath("userData"), "keyboards");
 const innerKblayoutsDir = path.join(__dirname, "assets/kb_layouts");
 const fontsDir = path.join(electron.app.getPath("userData"), "fonts");
 const innerFontsDir = path.join(__dirname, "assets/fonts");
+const binDir = path.join(electron.app.getPath("userData"), "bin");
+const innerLsdDir = path.join(__dirname, "assets/bin/lsd", `${process.platform}-${process.arch}`);
+const shellInitDir = path.join(electron.app.getPath("userData"), "shell_init");
 
 // Unset proxy env variables to avoid connection problems on the internal websockets
 // See #222
@@ -152,6 +155,22 @@ fs.readdirSync(innerFontsDir).forEach(e => {
     fs.writeFileSync(path.join(fontsDir, e), fs.readFileSync(path.join(innerFontsDir, e)));
 });
 
+// Mirror the bundled `lsd` binary (icon-capable `ls` replacement), if one is
+// shipped for this platform/arch. Absence is not an error: the icon-ls
+// feature just stays off and the shell behaves exactly as before.
+let lsdBin = null;
+if (fs.existsSync(path.join(innerLsdDir, process.platform === "win32" ? "lsd.exe" : "lsd"))) {
+    try {
+        fs.mkdirSync(binDir);
+    } catch(e) {
+        // Folder already exists
+    }
+    let lsdName = process.platform === "win32" ? "lsd.exe" : "lsd";
+    lsdBin = path.join(binDir, lsdName);
+    fs.writeFileSync(lsdBin, fs.readFileSync(path.join(innerLsdDir, lsdName)));
+    if (process.platform !== "win32") fs.chmodSync(lsdBin, 0o755);
+}
+
 // Version history logging
 const versionHistoryPath = path.join(electron.app.getPath("userData"), "versions_log.json");
 var versionHistory = fs.existsSync(versionHistoryPath) ? require(versionHistoryPath) : {};
@@ -233,6 +252,48 @@ function createWindow(settings) {
     signale.watch("Waiting for frontend connection...");
 }
 
+// Enable icon-capable `ls` (via the bundled `lsd`) scoped to eDEX-UI's own
+// terminal only, without touching the user's real shell rc files. Backs off
+// entirely if the user has already customized shellArgs, or if no lsd
+// binary is bundled for this shell/platform.
+function getShellInit(shellPath, userShellArgs, lsdBinPath) {
+    if (userShellArgs || !lsdBinPath) return null;
+
+    let shellName = path.basename(shellPath).toLowerCase().replace(/\.exe$/, "");
+    try {
+        fs.mkdirSync(shellInitDir, {recursive: true});
+    } catch(e) {
+        // Folder already exists
+    }
+
+    if (shellName === "bash") {
+        let rcPath = path.join(shellInitDir, "bashrc");
+        fs.writeFileSync(rcPath, [
+            '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"',
+            `alias ls='"${lsdBinPath}" --icon=always'`,
+            ''
+        ].join("\n"));
+        return { params: ["--rcfile", rcPath, "-i"] };
+    }
+
+    if (shellName === "zsh") {
+        let zdotdir = path.join(shellInitDir, "zsh");
+        try {
+            fs.mkdirSync(zdotdir, {recursive: true});
+        } catch(e) {
+            // Folder already exists
+        }
+        fs.writeFileSync(path.join(zdotdir, ".zshrc"), [
+            '[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"',
+            `alias ls="${lsdBinPath} --icon=always"`,
+            ''
+        ].join("\n"));
+        return { env: { ZDOTDIR: zdotdir } };
+    }
+
+    return null;
+}
+
 app.on('ready', async () => {
     signale.pending(`Loading settings file...`);
     let settings = require(settingsFile);
@@ -253,13 +314,15 @@ app.on('ready', async () => {
         TERM_PROGRAM_VERSION: app.getVersion()
     }, settings.env);
 
+    let shellInit = getShellInit(settings.shell, settings.shellArgs, lsdBin);
+
     signale.pending(`Creating new terminal process on port ${settings.port || '3000'}`);
     tty = new Terminal({
         role: "server",
         shell: settings.shell,
-        params: settings.shellArgs || '',
+        params: (shellInit && shellInit.params) || settings.shellArgs || '',
         cwd: settings.cwd,
-        env: cleanEnv,
+        env: Object.assign({}, cleanEnv, (shellInit && shellInit.env) || {}),
         port: settings.port || 3000
     });
     signale.success(`Terminal back-end initialized!`);
@@ -312,9 +375,9 @@ app.on('ready', async () => {
             let term = new Terminal({
                 role: "server",
                 shell: settings.shell,
-                params: settings.shellArgs || '',
+                params: (shellInit && shellInit.params) || settings.shellArgs || '',
                 cwd: tty.tty._cwd || settings.cwd,
-                env: cleanEnv,
+                env: Object.assign({}, cleanEnv, (shellInit && shellInit.env) || {}),
                 port: port
             });
             signale.success(`New terminal back-end initialized at ${port}`);

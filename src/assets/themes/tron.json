@@ -12,7 +12,7 @@
         "font_main_light": "United Sans Light"
     },
     "terminal": {
-        "fontFamily": "Fira Mono",
+        "fontFamily": "JetBrainsMono Nerd Font",
         "cursorStyle": "block",
         "foreground": "#aacfd1",
         "background": "#05080d",
