@@ -182,6 +182,9 @@ function createWindow(settings) {
     const pinToWorkArea = settings.forceFullscreen && process.platform === "linux";
     let {x, y, width, height} = pinToWorkArea ? display.workArea : display.bounds;
     if (!pinToWorkArea) { width++; height++; }
+    // An auto-hide dock doesn't reserve space in workArea, so it can still
+    // overlay the window's bottom edge. Shave off extra clearance for it.
+    if (pinToWorkArea) { height -= 70; }
     win = new BrowserWindow({
         title: "eDEX-UI",
         x,
