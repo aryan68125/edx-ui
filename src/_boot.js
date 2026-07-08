@@ -36,6 +36,7 @@ const path = require("path");
 const url = require("url");
 const fs = require("fs");
 const which = require("which");
+const color = require("color");
 const Terminal = require("./classes/terminal.class.js").Terminal;
 
 ipc.on("log", (e, type, content) => {
@@ -53,8 +54,10 @@ const innerKblayoutsDir = path.join(__dirname, "assets/kb_layouts");
 const fontsDir = path.join(electron.app.getPath("userData"), "fonts");
 const innerFontsDir = path.join(__dirname, "assets/fonts");
 const binDir = path.join(electron.app.getPath("userData"), "bin");
-const innerLsdDir = path.join(__dirname, "assets/bin/lsd", `${process.platform}-${process.arch}`);
 const shellInitDir = path.join(electron.app.getPath("userData"), "shell_init");
+const superfileConfigHome = path.join(electron.app.getPath("userData"), "superfile", "config_home");
+const superfileDataHome = path.join(electron.app.getPath("userData"), "superfile", "data_home");
+const superfileStateHome = path.join(electron.app.getPath("userData"), "superfile", "state_home");
 
 // Unset proxy env variables to avoid connection problems on the internal websockets
 // See #222
@@ -155,21 +158,27 @@ fs.readdirSync(innerFontsDir).forEach(e => {
     fs.writeFileSync(path.join(fontsDir, e), fs.readFileSync(path.join(innerFontsDir, e)));
 });
 
-// Mirror the bundled `lsd` binary (icon-capable `ls` replacement), if one is
-// shipped for this platform/arch. Absence is not an error: the icon-ls
-// feature just stays off and the shell behaves exactly as before.
-let lsdBin = null;
-if (fs.existsSync(path.join(innerLsdDir, process.platform === "win32" ? "lsd.exe" : "lsd"))) {
+// Mirror a bundled CLI tool's binary for this platform/arch, if one is
+// shipped. Absence is not an error: the feature depending on it just stays
+// off and the shell behaves exactly as before.
+function mirrorBundledBinary(name) {
+    let innerDir = path.join(__dirname, "assets/bin", name, `${process.platform}-${process.arch}`);
+    let exeName = process.platform === "win32" ? `${name}.exe` : name;
+    if (!fs.existsSync(path.join(innerDir, exeName))) return null;
+
     try {
         fs.mkdirSync(binDir);
     } catch(e) {
         // Folder already exists
     }
-    let lsdName = process.platform === "win32" ? "lsd.exe" : "lsd";
-    lsdBin = path.join(binDir, lsdName);
-    fs.writeFileSync(lsdBin, fs.readFileSync(path.join(innerLsdDir, lsdName)));
-    if (process.platform !== "win32") fs.chmodSync(lsdBin, 0o755);
+    let dest = path.join(binDir, exeName);
+    fs.writeFileSync(dest, fs.readFileSync(path.join(innerDir, exeName)));
+    if (process.platform !== "win32") fs.chmodSync(dest, 0o755);
+    return dest;
 }
+
+let lsdBin = mirrorBundledBinary("lsd");
+let spfBin = mirrorBundledBinary("spf");
 
 // Version history logging
 const versionHistoryPath = path.join(electron.app.getPath("userData"), "versions_log.json");
@@ -252,12 +261,33 @@ function createWindow(settings) {
     signale.watch("Waiting for frontend connection...");
 }
 
-// Enable icon-capable `ls` (via the bundled `lsd`) scoped to eDEX-UI's own
-// terminal only, without touching the user's real shell rc files. Backs off
-// entirely if the user has already customized shellArgs, or if no lsd
-// binary is bundled for this shell/platform.
-function getShellInit(shellPath, userShellArgs, lsdBinPath) {
-    if (userShellArgs || !lsdBinPath) return null;
+// Alias definitions for bundled CLI tools, scoped to eDEX-UI's own terminal.
+// Single-quoted outer wrapping with double-quoted inner paths works
+// identically in both bash and zsh, and survives spaces in paths (e.g. macOS's
+// "Application Support").
+function buildAliasLines(lsdBinPath, spfBinPath) {
+    let lines = [];
+    if (lsdBinPath) {
+        lines.push(`alias ls='"${lsdBinPath}" --icon=always'`);
+    }
+    if (spfBinPath) {
+        // Superfile's config/data/state are redirected into eDEX-UI's own
+        // folder via XDG env vars, scoped to this one alias invocation only,
+        // so it never touches (or is confused with) a standalone superfile
+        // install the user might have.
+        lines.push(`alias spf='XDG_CONFIG_HOME="${superfileConfigHome}" XDG_DATA_HOME="${superfileDataHome}" XDG_STATE_HOME="${superfileStateHome}" "${spfBinPath}"'`);
+    }
+    return lines;
+}
+
+// Enable icon-capable `ls` and the `spf` file manager (via the bundled
+// binaries) scoped to eDEX-UI's own terminal only, without touching the
+// user's real shell rc files. Backs off entirely if the user has already
+// customized shellArgs, or if neither tool is bundled for this shell/platform.
+function getShellInit(shellPath, userShellArgs, lsdBinPath, spfBinPath) {
+    if (userShellArgs) return null;
+    let aliasLines = buildAliasLines(lsdBinPath, spfBinPath);
+    if (aliasLines.length === 0) return null;
 
     let shellName = path.basename(shellPath).toLowerCase().replace(/\.exe$/, "");
     try {
@@ -268,11 +298,7 @@ function getShellInit(shellPath, userShellArgs, lsdBinPath) {
 
     if (shellName === "bash") {
         let rcPath = path.join(shellInitDir, "bashrc");
-        fs.writeFileSync(rcPath, [
-            '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"',
-            `alias ls='"${lsdBinPath}" --icon=always'`,
-            ''
-        ].join("\n"));
+        fs.writeFileSync(rcPath, ['[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"'].concat(aliasLines).concat(['']).join("\n"));
         return { params: ["--rcfile", rcPath, "-i"] };
     }
 
@@ -283,15 +309,139 @@ function getShellInit(shellPath, userShellArgs, lsdBinPath) {
         } catch(e) {
             // Folder already exists
         }
-        fs.writeFileSync(path.join(zdotdir, ".zshrc"), [
-            '[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"',
-            `alias ls="${lsdBinPath} --icon=always"`,
-            ''
-        ].join("\n"));
+        fs.writeFileSync(path.join(zdotdir, ".zshrc"), ['[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"'].concat(aliasLines).concat(['']).join("\n"));
         return { env: { ZDOTDIR: zdotdir } };
     }
 
     return null;
+}
+
+// Convert a theme's {r,g,b} channel numbers into a "#rrggbb" hex string.
+function themeAccentHex(theme) {
+    return color(`rgb(${theme.colors.r}, ${theme.colors.g}, ${theme.colors.b})`).hex();
+}
+
+// Generate a superfile config + color theme that mirrors the active eDEX-UI
+// theme, written into eDEX-UI's own scoped superfile config folder (never
+// the user's real ~/.config/superfile). Regenerated on every boot so it
+// always tracks whichever theme is currently selected.
+function generateSuperfileFiles(theme) {
+    let accent = themeAccentHex(theme);
+    let bg = theme.colors.light_black || "#000000";
+    let bg2 = theme.colors.black || "#000000";
+    let muted = theme.colors.grey || "#444444";
+    let accentColor = color(`rgb(${theme.colors.r}, ${theme.colors.g}, ${theme.colors.b})`);
+    let colorify = base => color(base).grayscale().mix(accentColor, 0.3).hex();
+
+    let correct = theme.colors.green || colorify("#4e9a06");
+    let error = theme.colors.red || colorify("#cc0000");
+    let hint = theme.colors.blue || colorify("#3465a4");
+    let cancel = theme.colors.yellow || colorify("#c4a000");
+    let gradientEnd = colorify("#ffffff");
+
+    let themeToml = [
+        `code_syntax_highlight = "monokai"`,
+        ``,
+        `full_screen_fg = "${accent}"`,
+        `full_screen_bg = "${bg}"`,
+        ``,
+        `gradient_color = ["${accent}", "${gradientEnd}"]`,
+        `directory_icon_color = "${accent}"`,
+        ``,
+        `file_panel_fg = "${accent}"`,
+        `file_panel_bg = "${bg}"`,
+        `file_panel_border = "${muted}"`,
+        `file_panel_border_active = "${accent}"`,
+        `file_panel_top_directory_icon = "${accent}"`,
+        `file_panel_top_path = "${accent}"`,
+        `file_panel_item_selected_fg = "${bg2}"`,
+        `file_panel_item_selected_bg = "${accent}"`,
+        ``,
+        `footer_fg = "${accent}"`,
+        `footer_bg = "${bg}"`,
+        `footer_border = "${muted}"`,
+        `footer_border_active = "${accent}"`,
+        ``,
+        `sidebar_fg = "${accent}"`,
+        `sidebar_bg = "${bg}"`,
+        `sidebar_title = "${accent}"`,
+        `sidebar_border = "${muted}"`,
+        `sidebar_border_active = "${accent}"`,
+        `sidebar_item_selected_fg = "${bg2}"`,
+        `sidebar_item_selected_bg = "${accent}"`,
+        `sidebar_divider = "${muted}"`,
+        ``,
+        `modal_fg = "${accent}"`,
+        `modal_bg = "${bg}"`,
+        `modal_border_active = "${accent}"`,
+        `modal_cancel_fg = "${bg2}"`,
+        `modal_cancel_bg = "${cancel}"`,
+        `modal_confirm_fg = "${bg2}"`,
+        `modal_confirm_bg = "${accent}"`,
+        ``,
+        `help_menu_hotkey = "${accent}"`,
+        `help_menu_title = "${accent}"`,
+        ``,
+        `cursor = "${accent}"`,
+        `correct = "${correct}"`,
+        `error = "${error}"`,
+        `hint = "${hint}"`,
+        `cancel = "${cancel}"`,
+        ``
+    ].join("\n");
+
+    let configToml = [
+        `editor = ""`,
+        `dir_editor = ""`,
+        `auto_check_update = false`,
+        `cd_on_quit = false`,
+        `default_open_file_preview = true`,
+        `show_image_preview = true`,
+        `show_panel_footer_info = true`,
+        `default_directory = "."`,
+        `file_size_use_si = false`,
+        `default_sort_type = 0`,
+        `sort_order_reversed = false`,
+        `case_sensitive_sort = false`,
+        `shell_close_on_success = false`,
+        `page_scroll_size = 0`,
+        `debug = false`,
+        `ignore_missing_fields = true`,
+        `file_panel_extra_columns = 0`,
+        `file_panel_name_percent = 50`,
+        ``,
+        `theme = "edex"`,
+        `code_previewer = ""`,
+        `nerdfont = true`,
+        `show_select_icons = true`,
+        `transparent_background = false`,
+        `file_preview_width = 0`,
+        `enable_file_preview_border = false`,
+        `sidebar_width = 20`,
+        `sidebar_sections = ["home", "pinned", "disks"]`,
+        `border_top = '─'`,
+        `border_bottom = '─'`,
+        `border_left = '│'`,
+        `border_right = '│'`,
+        `border_top_left = '╭'`,
+        `border_top_right = '╮'`,
+        `border_bottom_left = '╰'`,
+        `border_bottom_right = '╯'`,
+        `border_middle_left = '├'`,
+        `border_middle_right = '┤'`,
+        ``,
+        `metadata = false`,
+        `enable_md5_checksum = false`,
+        `zoxide_support = false`,
+        ``,
+        `[open_with]`,
+        ``
+    ].join("\n");
+
+    let themeDir = path.join(superfileConfigHome, "superfile", "theme");
+    fs.mkdirSync(themeDir, {recursive: true});
+    fs.writeFileSync(path.join(superfileConfigHome, "superfile", "config.toml"), configToml);
+    fs.writeFileSync(path.join(themeDir, "edex.toml"), themeToml);
 }
 
 app.on('ready', async () => {
@@ -314,7 +464,15 @@ app.on('ready', async () => {
         TERM_PROGRAM_VERSION: app.getVersion()
     }, settings.env);
 
-    let shellInit = getShellInit(settings.shell, settings.shellArgs, lsdBin);
+    if (spfBin) {
+        try {
+            let activeTheme = require(path.join(themesDir, `${settings.theme}.json`));
+            generateSuperfileFiles(activeTheme);
+        } catch(e) {
+            signale.warn(`Could not generate superfile theme, falling back to its default: ${e.message}`);
+        }
+    }
+    let shellInit = getShellInit(settings.shell, settings.shellArgs, lsdBin, spfBin);
 
     signale.pending(`Creating new terminal process on port ${settings.port || '3000'}`);
     tty = new Terminal({
