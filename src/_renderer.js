@@ -1125,8 +1125,10 @@ window.onresize = () => {
 // See #413
 window.resizeTimeout = null;
 let electronWin = electron.remote.getCurrentWindow();
+const pinnedToWorkArea = settings.forceFullscreen && require("os").platform() === "linux";
 electronWin.on("resize", () => {
     if (settings.keepGeometry === false) return;
+    if (pinnedToWorkArea) return;
     clearTimeout(window.resizeTimeout);
     window.resizeTimeout = setTimeout(() => {
         let win = electron.remote.getCurrentWindow();
@@ -1148,5 +1150,6 @@ electronWin.on("resize", () => {
 });
 
 electronWin.on("leave-full-screen", () => {
+    if (pinnedToWorkArea) return;
     electron.remote.getCurrentWindow().setSize(960, 540);
 });

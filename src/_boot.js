@@ -175,8 +175,13 @@ function createWindow(settings) {
     } else {
         display = electron.screen.getPrimaryDisplay();
     }
-    let {x, y, width, height} = display.bounds;
-    width++; height++;
+    // On Linux, a framed fullscreen window can still get drawn over by the
+    // shell's panel/dock. Pin to the reported work area (already excludes
+    // panel/dock space) instead of fighting the window manager for true
+    // exclusive fullscreen.
+    const pinToWorkArea = settings.forceFullscreen && process.platform === "linux";
+    let {x, y, width, height} = pinToWorkArea ? display.workArea : display.bounds;
+    if (!pinToWorkArea) { width++; height++; }
     win = new BrowserWindow({
         title: "eDEX-UI",
         x,
@@ -186,7 +191,7 @@ function createWindow(settings) {
         show: false,
         resizable: true,
         movable: settings.allowWindowed || true,
-        fullscreen: settings.forceFullscreen || false,
+        fullscreen: pinToWorkArea ? false : (settings.forceFullscreen || false),
         autoHideMenuBar: true,
         frame: settings.allowWindowed || true,
         backgroundColor: '#000000',
